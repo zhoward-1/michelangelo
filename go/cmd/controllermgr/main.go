@@ -29,6 +29,7 @@ import (
 	"github.com/michelangelo-ai/michelangelo/go/components/pipeline"
 	"github.com/michelangelo-ai/michelangelo/go/components/pipelinerun"
 	"github.com/michelangelo-ai/michelangelo/go/components/ray"
+	"github.com/michelangelo-ai/michelangelo/go/components/revision"
 	"github.com/michelangelo-ai/michelangelo/go/components/spark"
 	"github.com/michelangelo-ai/michelangelo/go/components/triggerrun"
 	"github.com/michelangelo-ai/michelangelo/go/controllermgr"
@@ -102,6 +103,7 @@ func options() fx.Option {
 		pipeline.Module,
 		pipelinerun.Module,
 		controllermgr.Module,
+		revision.Module,
 		deploymentOSSPlugin.Module,
 		deployment.Module,
 		backends.Module,
