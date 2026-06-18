@@ -29,9 +29,11 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/discovery"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/rest/fake"
+	k8sptr "k8s.io/utils/ptr"
 )
 
 // permissiveMapper returns a MockMapper with relaxed expectations on every
@@ -700,8 +702,8 @@ func TestCreateJob(t *testing.T) {
 			getClientSetError: errors.New("dummy error"),
 		},
 		{
-			msg:       "ray job create failure - encoding is not allowed for this codec",
-			wantError: "create ray job err:encoding is not allowed for this codec: *versioning.codec",
+			msg:       "ray job create failure - remote cluster GET fails with empty name",
+			wantError: "get remote ray cluster for owner ref: resource name may not be empty",
 			jobInput: &v2pb.RayJob{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "test",
@@ -760,6 +762,113 @@ func TestCreateJob(t *testing.T) {
 			}
 		})
 	}
+}
+
+// spyHelper is a test stub of the Helper interface for CreateJob owner-reference tests.
+// It captures the object passed to CreateResource and lets tests inject GetResource behavior.
+type spyHelper struct {
+	defaultHelper
+	getResourceFunc    func(ctx context.Context, result runtime.Object) error
+	capturedCreateBody runtime.Object
+	createErr          error
+}
+
+func (s *spyHelper) GetResource(_ context.Context, _ restclient.Interface, _, _, _ string, result runtime.Object) error {
+	return s.getResourceFunc(context.Background(), result)
+}
+
+func (s *spyHelper) CreateResource(_ context.Context, _ restclient.Interface, body runtime.Object, _, _ string) error {
+	s.capturedCreateBody = body
+	return s.createErr
+}
+
+func TestCreateJob_OwnerReferenceSet(t *testing.T) {
+	g := gomock.NewController(t)
+
+	testCluster := &v2pb.Cluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "testCluster"},
+	}
+	rayJob := &v2pb.RayJob{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-ray-job", Namespace: "test"},
+	}
+	rayCluster := &v2pb.RayCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-ray-cluster"},
+	}
+
+	remoteClusterUID := types.UID("remote-cluster-uid-1234")
+
+	f := computemocks.NewMockFactory(g)
+	restClient := discovery.NewDiscoveryClientForConfigOrDie(&restclient.Config{}).RESTClient()
+	f.EXPECT().GetClientSetForCluster(testCluster).Return(&compute.ClientSet{
+		Ray: restClient,
+	}, nil)
+
+	m := typesmocks.NewMockMapper(g)
+	m.EXPECT().MapGlobalJobToLocal(rayJob, rayCluster, testCluster).Return(&rayv1.RayJob{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-ray-job", Namespace: "default"},
+	}, nil)
+	m.EXPECT().GetLocalName(rayCluster).Return("default", "my-ray-cluster")
+	m.EXPECT().GetLocalName(rayJob).Return("default", "my-ray-job")
+
+	spy := &spyHelper{
+		getResourceFunc: func(_ context.Context, result runtime.Object) error {
+			rc := result.(*rayv1.RayCluster)
+			rc.Name = "my-ray-cluster"
+			rc.UID = remoteClusterUID
+			return nil
+		},
+	}
+
+	cl := &Client{factory: f, helper: spy, mapper: m, logger: zaptest.NewLogger(t)}
+	err := cl.CreateJob(context.Background(), rayJob, rayCluster, testCluster)
+	require.NoError(t, err)
+
+	capturedJob := spy.capturedCreateBody.(*rayv1.RayJob)
+	require.Len(t, capturedJob.OwnerReferences, 1)
+
+	ownerRef := capturedJob.OwnerReferences[0]
+	assert.Equal(t, "ray.io/v1", ownerRef.APIVersion)
+	assert.Equal(t, "RayCluster", ownerRef.Kind)
+	assert.Equal(t, "my-ray-cluster", ownerRef.Name)
+	assert.Equal(t, remoteClusterUID, ownerRef.UID)
+	assert.Equal(t, k8sptr.To(true), ownerRef.Controller)
+}
+
+func TestCreateJob_GetRemoteClusterFailure(t *testing.T) {
+	g := gomock.NewController(t)
+
+	testCluster := &v2pb.Cluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "testCluster"},
+	}
+	rayJob := &v2pb.RayJob{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-ray-job", Namespace: "test"},
+	}
+	rayCluster := &v2pb.RayCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-ray-cluster"},
+	}
+
+	f := computemocks.NewMockFactory(g)
+	restClient := discovery.NewDiscoveryClientForConfigOrDie(&restclient.Config{}).RESTClient()
+	f.EXPECT().GetClientSetForCluster(testCluster).Return(&compute.ClientSet{
+		Ray: restClient,
+	}, nil)
+
+	m := typesmocks.NewMockMapper(g)
+	m.EXPECT().MapGlobalJobToLocal(rayJob, rayCluster, testCluster).Return(&rayv1.RayJob{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-ray-job", Namespace: "default"},
+	}, nil)
+	m.EXPECT().GetLocalName(rayCluster).Return("default", "my-ray-cluster")
+
+	spy := &spyHelper{
+		getResourceFunc: func(_ context.Context, _ runtime.Object) error {
+			return errors.New("not found")
+		},
+	}
+
+	cl := &Client{factory: f, helper: spy, mapper: m}
+	err := cl.CreateJob(context.Background(), rayJob, rayCluster, testCluster)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "get remote ray cluster for owner ref")
 }
 
 func TestGetJobClusterStatus_ClientSetError(t *testing.T) {
