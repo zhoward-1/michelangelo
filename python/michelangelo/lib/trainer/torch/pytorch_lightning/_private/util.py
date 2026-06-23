@@ -13,7 +13,7 @@ import logging
 import os
 import re
 from tempfile import TemporaryDirectory
-from typing import Any, Union
+from typing import TYPE_CHECKING, Any, Union
 
 import pytorch_lightning as pl
 import ray
@@ -39,6 +39,11 @@ from michelangelo.lib.trainer.torch.pytorch_lightning._private.callbacks import 
     RayTrainReportCallback,
     RayTrainReportPerNodeCallback,
 )
+
+if TYPE_CHECKING:
+    from michelangelo.lib.trainer.torch.pytorch_lightning.schema import (
+        TrainingObserver,
+    )
 
 
 class UserInputError(Exception):
@@ -335,7 +340,7 @@ def _resolve_callbacks(
     callback_kwargs: dict[str, Any] | None = None,
     per_node_callback_kwargs: dict[str, Any] | None = None,
     strategy: Strategy | None = None,
-    training_observer: Any | None = None,
+    training_observer: TrainingObserver | None = None,
 ) -> tuple[list[Callback], bool]:
     """Build callback list for the Lightning Trainer.
 
